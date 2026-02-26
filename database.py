@@ -13,7 +13,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# 获取数据库连接的工具函数
+# 获取数据库连接的工具
 def get_db():
     db = SessionLocal()
     try:
