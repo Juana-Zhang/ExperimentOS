@@ -5,7 +5,19 @@ import database
 import models
 from pydantic import BaseModel
 
+
+
 app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+
+# 允许前端 (3000端口) 访问后端 (8000端口)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],)
 
 # --- 定义数据格式 (Schemas) ---
 class ExperimentCreate(BaseModel):
