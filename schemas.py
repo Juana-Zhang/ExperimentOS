@@ -1,7 +1,21 @@
 from pydantic import BaseModel
+from typing import Optional
 
-# 定义创建实验时需要填写的字段
-class ExperimentCreate(BaseModel):
+class ExperimentBase(BaseModel):
     name: str
-    hypothesis: str | None = None
-    owner: str | None = None
+    hypothesis: str
+    owner: str
+    status: str = "Draft"
+    sample_size: Optional[int] = 0
+    conversion_rate: Optional[float] = 0.0
+    p_value: Optional[float] = None
+    is_significant: Optional[bool] = False
+
+class ExperimentCreate(ExperimentBase):
+    pass
+
+class Experiment(ExperimentBase):
+    id: int
+
+    class Config:
+        from_attributes = True
