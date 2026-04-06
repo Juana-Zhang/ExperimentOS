@@ -10,27 +10,28 @@ from pydantic import BaseModel
 from typing import Optional
 
 app = FastAPI()
-models.Base.metadata.create_all(bind=database.engine) # 重新建带新字段的表
 
-# 1. Enable CORS for Frontend (Port 3000)
+# 自动建表（确保 lift, p_value 等字段存在）
+models.Base.metadata.create_all(bind=database.engine) 
+
+# 1. 跨域配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2. Updated Data Schemas to include Analytics Metrics
+# 2. 数据模型
 class ExperimentCreate(BaseModel):
     name: str
     hypothesis: Optional[str] = None
     owner: Optional[str] = "Juana Zhang"
-    # Added fields to match your new models.py
     sample_size: Optional[int] = 0
     conversion_rate: Optional[float] = 0.0
 
-# 3. Health Check Endpoints
+# 3. 基础路由与健康检查
 @app.get("/")
 def read_root():
     return {"status": "online", "message": "ExperimentOS API is Live"}
@@ -43,103 +44,101 @@ def test_db_connection(db: Session = Depends(database.get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
-# 4. Core Features: Create and List Experiments
+# 4. 实验管理
 @app.post("/experiments")
 def create_experiment(experiment: ExperimentCreate, db: Session = Depends(database.get_db)):
-    # Mapping Pydantic data to SQLAlchemy model
     db_exp = models.Experiment(
         name=experiment.name,
         hypothesis=experiment.hypothesis,
         owner=experiment.owner,
-        sample_size=experiment.sample_size,      # New metric
-        conversion_rate=experiment.conversion_rate # New metric
+        sample_size=experiment.sample_size,
+        conversion_rate=experiment.conversion_rate,
+        lift="--- (No analysis yet)",
+        status="Not analyzed"
     )
     db.add(db_exp)
     db.commit()
     db.refresh(db_exp)
     return db_exp
 
-
 @app.get("/experiments")
 def get_experiments(db: Session = Depends(database.get_db)):
-    # Retrieve all records ordered by ID descending (newest first)
     return db.query(models.Experiment).order_by(models.Experiment.id.desc()).all()
 
-# --- 5. 统计引擎核心逻辑 (增加了置信区间计算) ---
+# --- 5. 统计引擎核心逻辑 ---
 def calculate_ab_stats(c_count, c_size, v_count, v_size):
     try:
+        # Convert inputs to integers and perform basic validation
+        c_count, c_size = int(c_count), int(c_size)
+        v_count, v_size = int(v_count), int(v_size)
+        
+        if c_size == 0 or v_size == 0:
+            return 1.0, 0.0, 0.0, 0.0
+        
+        # Calculate conversion rates
         p_c = c_count / c_size
         p_v = v_count / v_size
         
-        # 1. 计算 P-value (Z-test)
+        # Calculate lift
+        lift_pct = ((p_v - p_c) / p_c * 100) if p_c > 0 else 0
+        
+        # Calculate p-value
         p_combined = (c_count + v_count) / (c_size + v_size)
         se_pooled = math.sqrt(p_combined * (1 - p_combined) * (1/c_size + 1/v_size))
         z_score = (p_v - p_c) / se_pooled if se_pooled > 0 else 0
         p_value = (1 - stats.norm.cdf(abs(z_score))) * 2
         
-        # 2. 计算 95% 置信区间 (基于各自的标准误)
-        # 我们计算的是差异 (p_v - p_c) 的置信区间
+        # Calculate 95% CI for the difference in proportions
         se_diff = math.sqrt((p_c * (1 - p_c) / c_size) + (p_v * (1 - p_v) / v_size))
         margin_of_error = 1.96 * se_diff
+        relative_diff_low = ((p_v - p_c) - margin_of_error) / p_c * 100 if p_c > 0 else 0
+        relative_diff_high = ((p_v - p_c) + margin_of_error) / p_c * 100 if p_c > 0 else 0
         
-        ci_lower = (p_v - p_c) - margin_of_error
-        ci_upper = (p_v - p_c) + margin_of_error
-        
-        return round(p_value, 4), round(ci_lower, 4), round(ci_upper, 4)
-    except ZeroDivisionError:
-        return 1.0, 0.0, 0.0
+        return round(p_value, 4), round(lift_pct, 2), round(relative_diff_low, 2), round(relative_diff_high, 2)
+    except Exception as e:
+        print(f"Error in calculate_ab_stats: {str(e)}")
+        return 1.0, 0.0, 0.0, 0.0
 
-# --- 6. 更新实验数据并自动计算显著性 (加入业务逻辑判断) ---
+# --- 6. 结果更新路由 (最小改动版) ---
 @app.post("/experiments/{exp_id}/update-results")
-def update_results(
-    exp_id: int, 
-    c_conversions: int, c_users: int, 
-    v_conversions: int, v_users: int,
-    db: Session = Depends(database.get_db)
-):
+def update_results(exp_id: int, c_conversions: int, c_users: int, v_conversions: int, v_users: int, db: Session = Depends(database.get_db)):
     db_exp = db.query(models.Experiment).filter(models.Experiment.id == exp_id).first()
     if not db_exp:
         raise HTTPException(status_code=404, detail="Experiment not found")
-
-    if c_users <= 0 or v_users <= 0:
-        raise HTTPException(status_code=400, detail="Sample size must be > 0")
-
-    # 1. 调用增强版统计引擎
-    p_val, ci_low, ci_high = calculate_ab_stats(c_conversions, c_users, v_conversions, v_users)
     
-    p_c = c_conversions / c_users
-    p_v = v_conversions / v_users
-    lift = (p_v - p_c) / p_c if p_c > 0 else 0
-
-    # 2. 【核心修正】：双重判定逻辑
-    # 只有当 P < 0.05 且 实验组转化率 > 对照组时，才给 Winner 勋章
-    is_positive_winner = (p_val < 0.05) and (p_v > p_c)
+    try:
+        # 1. 计算逻辑
+        p_val, lift_pct, ci_low, ci_high = calculate_ab_stats(c_conversions, c_users, v_conversions, v_users)
+        
+        # 2. 更新数据
+        db_exp.p_value = p_val
+        
+        # 3. 格式化 lift 字段为字符串，使用简洁的格式
+        # 注意：这里使用了你建议的格式，去掉了重复的CI标记
+        db_exp.lift = f"{lift_pct}%\n95% CI: {ci_low}% ~ {ci_high}%"
+        
+        # 4. 设置状态和显著性
+        c_conv, c_user = int(c_conversions), int(c_users)
+        v_conv, v_user = int(v_conversions), int(v_users)
+        
+        p_c = c_conv/c_user if c_user > 0 else 0
+        p_v = v_conv/v_user if v_user > 0 else 0
+        
+        if p_val < 0.05:
+            if p_v > p_c:
+                db_exp.is_significant = True
+                db_exp.status = "Significant Winner ✅"
+            else:
+                db_exp.is_significant = False
+                db_exp.status = "Significant Loser ❌"
+        else:
+            db_exp.is_significant = False
+            db_exp.status = "Not Significant"
+        
+        db.commit()
+        db.refresh(db_exp)
+        return db_exp
     
-    # 3. 更新数据库字段
-    db_exp.p_value = p_val
-    db_exp.is_significant = is_positive_winner
-    
-    # 根据结果更新状态文本，更直观
-    if is_positive_winner:
-        db_exp.status = "Completed - Positive Winner 🏆"
-    elif (p_val < 0.05) and (p_v < p_c):
-        db_exp.status = "Completed - Significant Loser ❌"
-    else:
-        db_exp.status = "Completed - Not Significant"
-
-    # 4. 格式化 Lift 字符串 (存入你在 models.py 刚加的 lift 字段)
-    # 格式示例: "15.2% (95% CI: 2.1% ~ 28.3%)"
-    ci_low_pct = round(ci_low * 100, 2)
-    ci_high_pct = round(ci_high * 100, 2)
-    lift_pct = round(lift * 100, 2)
-    db_exp.lift = f"{lift_pct}% (95% CI: {ci_low_pct}% ~ {ci_high_pct}%)"
-    
-    db.commit()
-    db.refresh(db_exp)
-    
-    return {
-        "status": "Success",
-        "p_value": p_val,
-        "is_significant": is_positive_winner,
-        "lift": db_exp.lift
-    }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating results: {str(e)}")

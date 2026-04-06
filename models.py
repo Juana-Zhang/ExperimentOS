@@ -4,16 +4,15 @@ from database import Base
 
 class Experiment(Base):
     __tablename__ = "experiments"
-
+    
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    hypothesis = Column(String)
-    owner = Column(String)
-    status = Column(String, default="Draft")
-    
-    # --- 新增统计字段 ---
-    sample_size = Column(Integer, default=0)       # 样本量
-    conversion_rate = Column(Float, default=0.0)   # 转化率
-    p_value = Column(Float, nullable=True)         # P值（判断显著性）
-    is_significant = Column(Boolean, default=False) # 是否显著
-    
+    hypothesis = Column(String, nullable=True)
+    owner = Column(String, nullable=True)
+    sample_size = Column(Integer, default=0)
+    conversion_rate = Column(Float, default=0.0)
+    p_value = Column(Float, nullable=True)
+    lift = Column(String, nullable=True)  # 存储为字符串，包含 CI
+    is_significant = Column(Boolean, default=False)
+    status = Column(String, nullable=True)
+

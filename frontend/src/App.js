@@ -1,10 +1,14 @@
 import React, { useEffect, useState } from 'react';
 
+// 确保这里的地址和后端一致
+const API_BASE = "http://localhost:8000";
+
 function App() {
   const [experiments, setExperiments] = useState([]);
 
+  // 拉取数据的函数
   const fetchExperiments = () => {
-    fetch("http://127.0.0.1:8000/experiments")
+    fetch(`${API_BASE}/experiments`)
       .then(res => res.json())
       .then(data => setExperiments(data))
       .catch(err => console.error("Error:", err));
@@ -16,29 +20,37 @@ function App() {
   const handleSubmit = () => {
     const name = document.getElementById('input-name').value;
     const hypo = document.getElementById('input-hypothesis').value;
-    fetch("http://127.0.0.1:8000/experiments", {
+    if (!name) return alert("Please enter a name");
+
+    fetch(`${API_BASE}/experiments`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, hypothesis: hypo, owner: "Juana Zhang" })
-    }).then(() => { window.location.reload(); });
+    }).then(() => {
+      fetchExperiments();
+      document.getElementById('input-name').value = '';
+      document.getElementById('input-hypothesis').value = '';
+    });
   };
 
-  // 2. 核心自动化：直接在页面更新 A/B 测试结果
+  // 2. 运行统计分析 (核心改动：点击后刷新列表)
   const handleUpdateResults = (id) => {
     const c_conv = document.getElementById(`c_conv_${id}`).value;
     const c_user = document.getElementById(`c_user_${id}`).value;
     const v_conv = document.getElementById(`v_conv_${id}`).value;
     const v_user = document.getElementById(`v_user_${id}`).value;
 
-    fetch(`http://127.0.0.1:8000/experiments/${id}/update-results?c_conversions=${c_conv}&c_users=${c_user}&v_conversions=${v_conv}&v_users=${v_user}`, {
+    fetch(`${API_BASE}/experiments/${id}/update-results?c_conversions=${c_conv}&c_users=${c_user}&v_conversions=${v_conv}&v_users=${v_user}`, {
       method: "POST"
     })
     .then(res => res.json())
     .then(data => {
-      alert(`Analysis Complete! Significant: ${data.is_significant}`);
-      fetchExperiments(); // 局部刷新数据，看到勋章跳出来
+      console.log("Analysis Success:", data);
+      // 关键：分析完立刻重新获取列表，这样 exp.lift 才会从数据库更新到页面
+      fetchExperiments(); 
     });
   };
+
 
   return (
     <div style={{ padding: '40px', fontFamily: 'Arial, sans-serif', backgroundColor: '#f8f9fa', minHeight: '100vh' }}>
@@ -54,35 +66,50 @@ function App() {
         </div>
       </div>
 
-      {/* 实验卡片列表 */}
+      {/* 实验列表 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))', gap: '20px' }}>
         {experiments.map(exp => (
           <div key={exp.id} style={{ 
             background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.08)', 
-            borderLeft: exp.is_significant ? '8px solid #27ae60' : '8px solid #3498db', position: 'relative' 
+            borderLeft: exp.status.includes('Winner') ? '8px solid #27ae60' : (exp.status.includes('Loser') ? '8px solid #e74c3c' : '8px solid #3498db'),
+            position: 'relative' 
           }}>
-            {exp.is_significant && <div style={{ position: 'absolute', top: '-10px', right: '-10px', backgroundColor: '#27ae60', color: '#fff', padding: '5px 12px', borderRadius: '20px', fontWeight: 'bold' }}>🏆 WINNER</div>}
+            {exp.is_significant && <div style={{ position: 'absolute', top: '10px', right: '10px', backgroundColor: '#27ae60', color: '#fff', padding: '5px 12px', borderRadius: '20px', fontWeight: 'bold', fontSize: '0.8em' }}>🏆 WINNER</div>}
             
             <h3>{exp.name}</h3>
             <p style={{ color: '#7f8c8d', fontSize: '0.9em' }}>{exp.hypothesis}</p>
 
-            {/* 自动化录入区 */}
-            <div style={{ backgroundColor: '#f9f9f9', padding: '15px', borderRadius: '8px', marginTop: '10px', border: '1px solid #eee' }}>
+            {/* 输入数据 */}
+            <div style={{ backgroundColor: '#f9f9f9', padding: '15px', borderRadius: '8px', marginTop: '10px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '0.8em' }}>
-                <div><strong>Control (Conv/Total)</strong><br/>
-                  <input id={`c_conv_${exp.id}`} placeholder="Conv" style={{ width: '40px' }} /> / <input id={`c_user_${exp.id}`} placeholder="Total" style={{ width: '50px' }} />
+                <div><strong>Control (C/N)</strong><br/>
+                  <input id={`c_conv_${exp.id}`} style={{ width: '40px' }} /> / <input id={`c_user_${exp.id}`} style={{ width: '50px' }} />
                 </div>
-                <div><strong>Variant (Conv/Total)</strong><br/>
-                  <input id={`v_conv_${exp.id}`} placeholder="Conv" style={{ width: '40px' }} /> / <input id={`v_user_${exp.id}`} placeholder="Total" style={{ width: '50px' }} />
+                <div><strong>Variant (C/N)</strong><br/>
+                  <input id={`v_conv_${exp.id}`} style={{ width: '40px' }} /> / <input id={`v_user_${exp.id}`} style={{ width: '50px' }} />
                 </div>
               </div>
-              <button onClick={() => handleUpdateResults(exp.id)} style={{ width: '100%', marginTop: '10px', padding: '5px', backgroundColor: '#2c3e50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                Run Statistical Analysis
+              <button onClick={() => handleUpdateResults(exp.id)} style={{ width: '100%', marginTop: '10px', padding: '8px', backgroundColor: '#2c3e50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+                Run Statistical Engine
               </button>
             </div>
 
-            <div style={{ marginTop: '15px', fontSize: '0.85em', color: exp.is_significant ? '#27ae60' : '#7f8c8d' }}>
-              <strong>P-value:</strong> {exp.p_value ?? 'N/A'} | <strong>Status:</strong> {exp.is_significant ? '✅ Significant' : exp.status}
+            {/* 核心改动：展示 Lift 和 Confidence Interval */}
+            <div style={{ marginTop: '15px', padding: '10px', backgroundColor: '#eef2f7', borderRadius: '6px' }}>
+              <div style={{ fontSize: '0.75em', fontWeight: 'bold', color: '#555' }}>LIFT & 95% CI:</div>
+              <div style={{ 
+                fontSize: '1em', 
+                fontWeight: 'bold', 
+                color: exp.status && exp.status.includes('Winner') ? '#27ae60' : 
+           (exp.status && exp.status.includes('Loser') ? '#e74c3c' : '#2c3e50'),
+    whiteSpace: 'pre-line'  // 这一行很重要，允许显示换行符
+  }}>
+                {exp.lift || '--- (No analysis yet)'}
+              </div>
+            </div>
+
+            <div style={{ marginTop: '10px', fontSize: '0.8em', color: '#7f8c8d' }}>
+              <strong>P-value:</strong> {exp.p_value ?? 'N/A'} | <strong>Status:</strong> {exp.status}
             </div>
           </div>
         ))}
