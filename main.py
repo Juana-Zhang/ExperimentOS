@@ -65,30 +65,31 @@ def get_experiments(db: Session = Depends(database.get_db)):
     # Retrieve all records ordered by ID descending (newest first)
     return db.query(models.Experiment).order_by(models.Experiment.id.desc()).all()
 
-# --- 5. 统计引擎核心逻辑 (Statistical Engine) ---
-def calculate_ab_test(c_count, c_size, v_count, v_size):
-    """
-    计算 A/B 测试的 P-value (基于 Z-test)
-    c_count: 对照组转化数, c_size: 对照组总人数
-    v_count: 实验组转化数, v_size: 实验组总人数
-    """
+# --- 5. 统计引擎核心逻辑 (增加了置信区间计算) ---
+def calculate_ab_stats(c_count, c_size, v_count, v_size):
     try:
-        p1 = c_count / c_size
-        p2 = v_count / v_size
+        p_c = c_count / c_size
+        p_v = v_count / v_size
+        
+        # 1. 计算 P-value (Z-test)
         p_combined = (c_count + v_count) / (c_size + v_size)
-        
-        # 计算标准误差 (Standard Error)
-        se = math.sqrt(p_combined * (1 - p_combined) * (1/c_size + 1/v_size))
-        
-        # 计算 Z-score
-        z_score = (p2 - p1) / se
-        # 计算双尾 P-value
+        se_pooled = math.sqrt(p_combined * (1 - p_combined) * (1/c_size + 1/v_size))
+        z_score = (p_v - p_c) / se_pooled if se_pooled > 0 else 0
         p_value = (1 - stats.norm.cdf(abs(z_score))) * 2
-        return round(p_value, 4)
+        
+        # 2. 计算 95% 置信区间 (基于各自的标准误)
+        # 我们计算的是差异 (p_v - p_c) 的置信区间
+        se_diff = math.sqrt((p_c * (1 - p_c) / c_size) + (p_v * (1 - p_v) / v_size))
+        margin_of_error = 1.96 * se_diff
+        
+        ci_lower = (p_v - p_c) - margin_of_error
+        ci_upper = (p_v - p_c) + margin_of_error
+        
+        return round(p_value, 4), round(ci_lower, 4), round(ci_upper, 4)
     except ZeroDivisionError:
-        return 1.0
+        return 1.0, 0.0, 0.0
 
-# --- 6. 【新增核心功能】更新实验数据并自动计算显著性 ---
+# --- 6. 更新实验数据并自动计算显著性 (加入业务逻辑判断) ---
 @app.post("/experiments/{exp_id}/update-results")
 def update_results(
     exp_id: int, 
@@ -96,19 +97,42 @@ def update_results(
     v_conversions: int, v_users: int,
     db: Session = Depends(database.get_db)
 ):
-    # 1. 查找对应的实验记录
     db_exp = db.query(models.Experiment).filter(models.Experiment.id == exp_id).first()
     if not db_exp:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
-    # 2. 调用统计引擎计算 P-value
-    p_val = calculate_ab_test(c_conversions, c_users, v_conversions, v_users)
+    if c_users <= 0 or v_users <= 0:
+        raise HTTPException(status_code=400, detail="Sample size must be > 0")
+
+    # 1. 调用增强版统计引擎
+    p_val, ci_low, ci_high = calculate_ab_stats(c_conversions, c_users, v_conversions, v_users)
+    
+    p_c = c_conversions / c_users
+    p_v = v_conversions / v_users
+    lift = (p_v - p_c) / p_c if p_c > 0 else 0
+
+    # 2. 【核心修正】：双重判定逻辑
+    # 只有当 P < 0.05 且 实验组转化率 > 对照组时，才给 Winner 勋章
+    is_positive_winner = (p_val < 0.05) and (p_v > p_c)
     
     # 3. 更新数据库字段
     db_exp.p_value = p_val
-    db_exp.status = "Completed"
-    # 显著性判定：P-value < 0.05 则为显著 (Winner)
-    db_exp.is_significant = p_val < 0.05 
+    db_exp.is_significant = is_positive_winner
+    
+    # 根据结果更新状态文本，更直观
+    if is_positive_winner:
+        db_exp.status = "Completed - Positive Winner 🏆"
+    elif (p_val < 0.05) and (p_v < p_c):
+        db_exp.status = "Completed - Significant Loser ❌"
+    else:
+        db_exp.status = "Completed - Not Significant"
+
+    # 4. 格式化 Lift 字符串 (存入你在 models.py 刚加的 lift 字段)
+    # 格式示例: "15.2% (95% CI: 2.1% ~ 28.3%)"
+    ci_low_pct = round(ci_low * 100, 2)
+    ci_high_pct = round(ci_high * 100, 2)
+    lift_pct = round(lift * 100, 2)
+    db_exp.lift = f"{lift_pct}% (95% CI: {ci_low_pct}% ~ {ci_high_pct}%)"
     
     db.commit()
     db.refresh(db_exp)
@@ -116,6 +140,6 @@ def update_results(
     return {
         "status": "Success",
         "p_value": p_val,
-        "is_significant": db_exp.is_significant,
-        "recommendation": "Deploy Variant" if db_exp.is_significant and (v_conversions/v_users > c_conversions/c_users) else "Keep Control"
+        "is_significant": is_positive_winner,
+        "lift": db_exp.lift
     }
